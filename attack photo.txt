@@ -1,0 +1,101 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import os
+#google colab で行い、play.scvファイルをgoogle colabファイルにアップロードしてください。
+# ==== Load play.csv ====
+df = pd.read_csv("/content/play.csv")#ここにplay.csvを入れてください
+
+# ==== Extract meaningful actions ====
+df_actions = df[
+    (df["F_パス"] == 1) |
+    (df["F_クロス"] == 1) |
+    (df["F_ドリブル"] == 1) |
+    (df["F_シュート"] == 1)
+].copy()
+
+df_actions = df_actions.sort_values(["攻撃履歴No", "履歴No"])
+
+# ==== Extract attack IDs that end with a shot ====
+shoot_attacks = df_actions[df_actions["F_シュート"] == 1]["攻撃履歴No"].unique()
+
+print(f"Detected attacking IDs ending in shot: {shoot_attacks}")
+
+# ==== Pitch drawing function ====
+def draw_pitch(ax):
+    length = 105
+    width = 68
+    goal_w = 7.32
+
+    ax.add_patch(patches.Rectangle((-width/2, -length/2), width, length,
+                                   fill=False, lw=2, color="black"))
+    ax.plot([-width/2, width/2], [0, 0], color="black", lw=1)
+    ax.add_patch(plt.Circle((0, 0), 9.15, fill=False, color="black", lw=1.5))
+
+    # goals
+    ax.add_patch(patches.Rectangle((-goal_w/2, -length/2 - 2.44), goal_w, 2.44,
+                                   fill=True, color="gray"))
+    ax.add_patch(patches.Rectangle((-goal_w/2, length/2), goal_w, 2.44,
+                                   fill=True, color="gray"))
+
+    ax.set_xlim(-width/2 - 5, width/2 + 5)
+    ax.set_ylim(-length/2 - 5, length/2 + 5)
+    ax.set_aspect("equal")
+    ax.set_xlabel("Y (width)")
+    ax.set_ylabel("X (length)")
+
+# ==== Output folder ====
+os.makedirs("/content/output", exist_ok=True)
+
+# ==== Visualize attacks (attacking team only) ====
+for attack_id in shoot_attacks:
+
+    df_attack = df_actions[df_actions["攻撃履歴No"] == attack_id]
+
+    if df_attack.empty:
+        continue
+
+    # --- attacking team is the teamID of the first event ---
+    attacking_team_id = int(df_attack.iloc[0]["チームID"])
+
+    # filter only attacking team
+    team_df = df_attack[df_attack["チームID"] == attacking_team_id]
+
+    if team_df.empty:
+        continue
+
+    fig, ax = plt.subplots(figsize=(7, 10))
+    draw_pitch(ax)
+    ax.set_title(f"Team {attacking_team_id} – Attack {attack_id}")
+
+    prev_x, prev_y = None, None
+
+    for _, row in team_df.iterrows():
+
+        # Convert play.csv coords to center origin
+        x = row["位置座標X"] - 52.5   # X軸（縦）
+        y = -(row["位置座標Y"] - 34)  # 左右反転して横軸
+
+        # Pass/Dribble/Cross lines
+        if prev_x is not None:
+            ax.annotate("",
+                        xy=(y, x),
+                        xytext=(prev_y, prev_x),
+                        arrowprops=dict(arrowstyle="->", color="blue", lw=2))
+
+        # Marker style
+        if row["F_シュート"] == 1:
+            ax.scatter(y, x, color="gold", s=150, marker="*",
+                       edgecolor="black")
+        else:
+            ax.scatter(y, x, color="blue", s=70)
+
+        prev_x, prev_y = x, y
+
+    # === save file (attacking team only) ===
+    save_path = f"/content/attack_{attack_id}_team_{attacking_team_id}.png"
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+    print("Saved:", save_path)
+
+print("🎉 Completed (attacking team only)!")
