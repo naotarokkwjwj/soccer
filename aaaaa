@@ -1,0 +1,121 @@
+import pandas as pd
+import numpy as np
+
+# ------------------------------------------------------------------
+# 1. 分析したいチーム名をここで指定してください
+# ------------------------------------------------------------------
+target_team_name ="川崎フロンターレ"  # ← ここを '川崎フロンターレ' や 'アルビレックス新潟' などに変更可能
+
+# ------------------------------------------------------------------
+# 2. データ準備 (play.csv読み込み & トラッキングデータ擬似生成)
+# ------------------------------------------------------------------
+try:
+    # play.csv 読み込み
+    raw_play = pd.read_csv('play.csv', encoding='utf-8-sig')
+
+    # 列名変更 (日本語対応)
+    col_map = {
+        'チーム名': 'Team', 'アクション名': 'Action',
+        '攻撃履歴No': 'AttackID', 'ボールＸ': 'x', 'ボールＹ': 'y',
+        'ハーフ開始相対時間': 'Time', '履歴No': 'HistoryNo', '攻撃方向': 'Dir',
+        '選手名': 'Player'
+    }
+    df = raw_play.rename(columns={k: v for k, v in col_map.items() if k in raw_play.columns})
+
+    # 座標変換 & Frame生成
+    df['x_m'] = pd.to_numeric(df['x'], errors='coerce') / 3.0
+    df['y_m'] = pd.to_numeric(df['y'], errors='coerce') / 3.0
+    time_col = df.get('Time', df.get('HistoryNo'))
+    df['Frame'] = (time_col * 25 + 100000).astype(int)
+
+    # トラッキングデータ(擬似)生成
+    target_frames = df['Frame'].unique()
+    track_records = []
+    # ※本来は本物のトラッキングデータを使いますが、ここではデモ用に生成します
+    for f in target_frames:
+        for i in range(1, 12):
+            track_records.append({'Frame': f, 'No': i, 'X': np.random.randint(-4000, 4000), 'Y': np.random.randint(-3000, 3000)})
+    df_track = pd.DataFrame(track_records)
+
+    # ------------------------------------------------------------------
+    # 3. 個別分析ロジック実行
+    # ------------------------------------------------------------------
+    print(f"\n【分析対象チーム: {target_team_name}】\n")
+
+    # チーム絞り込み
+    team_df = df[df['Team'] == target_team_name].copy()
+    if team_df.empty:
+        print("エラー: 指定されたチームのデータが見つかりません。")
+    else:
+        # シュートイベント抽出
+        shots = team_df[team_df['Action'].str.contains('シュート|ゴール', na=False)]
+        print(f"分析対象シュート数: {len(shots)} シーン\n")
+
+        print("-" * 90)
+        print(f"{'AttackID':<10} | {'Shooter':<12} | {'Order':<6} | {'Passer':<12} | {'Type':<10} | {'V_Pack':<6} | {'D_Out':<6}")
+        print("-" * 90)
+
+        # 各シュートについてループ
+        for idx, shot in shots.iterrows():
+            attack_id = shot['AttackID']
+            sequence = team_df[team_df['AttackID'] == attack_id].sort_values('Frame')
+            try:
+                shot_seq_idx = sequence.index.get_loc(idx)
+            except: continue
+
+            # シュートシーンごとのデータを格納するリスト
+            scene_passes = []
+            pass_count = 0
+
+            # 遡ってパスを解析
+            for i in range(1, 20):
+                if shot_seq_idx - i < 0: break
+                if pass_count >= 5: break
+
+                event = sequence.iloc[shot_seq_idx - i]
+
+                if 'パス' in str(event['Action']) or 'クロス' in str(event['Action']):
+                    pass_count += 1
+
+                    # パッキング計算
+                    start_x = event['x_m']
+                    next_event = sequence.iloc[shot_seq_idx - i + 1]
+                    end_x = next_event['x_m']
+                    if pd.isna(end_x): continue
+                    if event['Dir'] == 2: start_x, end_x = -start_x, -end_x
+
+                    frame = event['Frame']
+                    opponents = df_track[df_track['Frame'] == frame]
+                    opp_x = opponents['X'] / 100.0
+
+                    v_packed = 0
+                    if end_x > start_x:
+                        v_packed = opponents[(opp_x > start_x) & (opp_x < end_x)].shape[0]
+                    d_outplayed = opponents[opp_x < end_x].shape[0]
+
+                    dx = end_x - start_x
+                    dy = abs(next_event['y_m'] - event['y_m'])
+                    p_type = 'Vertical' if (dx > 5 and dx > dy) else ('Horizontal' if (dy > dx and dy > 5) else 'Link-up')
+
+                    # 結果をリストに追加
+                    scene_passes.append({
+                        'Order': -pass_count,
+                        'Passer': event['Player'],
+                        'Type': p_type,
+                        'V_Pack': v_packed,
+                        'D_Out': d_outplayed
+                    })
+
+            # 順番を整えて表示 (-5 -> -1)
+            for p in sorted(scene_passes, key=lambda x: x['Order']):
+                # パスの種類を日本語化して見やすく
+                type_str = "縦パス" if p['Type'] == 'Vertical' else ("横パス" if p['Type'] == 'Horizontal' else "繋ぎ")
+
+                print(f"{attack_id:<10} | {str(shot['Player']):<12} | {p['Order']:<6} | {str(p['Passer']):<12} | {type_str:<10} | {p['V_Pack']:<6} | {p['D_Out']:<6}")
+
+            # シーンごとの区切り線
+            if len(scene_passes) > 0:
+                print("-" * 90)
+
+except Exception as e:
+    print(f"エラーが発生しました: {e}")
