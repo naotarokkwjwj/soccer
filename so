@@ -1,0 +1,205 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# 日本語フォント設定
+!pip install -q japanize-matplotlib
+import japanize_matplotlib
+
+# --------------------------------------------------
+# 1. 分析関数の定義
+# --------------------------------------------------
+def analyze_kawasaki_critical_5(play_df, track_df, target_team='川崎フロンターレ'):
+    print(f"分析対象: {target_team}")
+
+    # --- 1.1 前処理: 列名正規化 & 絞り込み ---
+    col_map = {
+        'チーム名': 'Team', 'アクション名': 'Action',
+        '攻撃履歴No': 'AttackID', 'ボールＸ': 'x', 'ボールＹ': 'y',
+        'ハーフ開始相対時間': 'Time', '履歴No': 'HistoryNo', '攻撃方向': 'Dir',
+        '選手名': 'Player'
+    }
+    df = play_df.rename(columns={k: v for k, v in col_map.items() if k in play_df.columns})
+
+    if 'Team' not in df.columns:
+        raise KeyError("'Team'列（元の'チーム名'）が見つかりません。")
+
+    df = df[df['Team'] == target_team].copy()
+    if df.empty:
+        print("データがありません。")
+        return pd.DataFrame()
+
+    df['x_m'] = pd.to_numeric(df['x'], errors='coerce') / 3.0
+    df['y_m'] = pd.to_numeric(df['y'], errors='coerce') / 3.0
+
+    if 'Frame' not in df.columns:
+        time_col = df.get('Time', df.get('HistoryNo'))
+        df['Frame'] = (time_col * 25 + 100000).astype(int)
+
+    # --- 1.2 5パス解析ロジック ---
+    results = []
+
+    # シュートイベントを抽出
+    shots = df[df['Action'].str.contains('シュート|ゴール', na=False)]
+    print(f"川崎フロンターレの分析対象シュート数: {len(shots)} シーン")
+
+    for idx, shot in shots.iterrows():
+        attack_id = shot['AttackID']
+        # 同じ攻撃シーケンスを取得
+        sequence = df[df['AttackID'] == attack_id].sort_values('Frame')
+
+        try:
+            shot_seq_idx = sequence.index.get_loc(idx)
+        except:
+            continue
+
+        pass_count = 0
+
+        # シュートの直前から逆順にループ
+        for i in range(1, 20):
+            if shot_seq_idx - i < 0: break
+            if pass_count >= 5: break
+
+            event = sequence.iloc[shot_seq_idx - i]
+
+            if 'パス' in str(event['Action']) or 'クロス' in str(event['Action']):
+                pass_count += 1
+
+                # --- ★ここからトラッキングデータ分析★ ---
+                start_x = event['x_m']
+                next_event = sequence.iloc[shot_seq_idx - i + 1]
+                end_x = next_event['x_m']
+
+                if pd.isna(end_x): continue # 次のイベントがない場合はスキップ
+
+                if event['Dir'] == 2:
+                    start_x, end_x = -start_x, -end_x
+
+                # トラッキングデータ参照
+                frame = event['Frame']
+                # ※ HA=2 が敵チームと仮定。実際はplay_dfのHomeAwayFと照合
+                opponents = track_df[track_df['Frame'] == frame]
+                if opponents.empty: continue
+
+                opp_x_m = opponents['X'] / 100.0 # cm -> m
+
+                # --- 1. Vertical Packing (縦の破壊力) ---
+                v_packed = 0
+                if end_x > start_x:
+                    v_packed = opponents[(opp_x_m > start_x) & (opp_x_m < end_x)].shape[0]
+
+                # --- 2. Defenders Outplayed (横の破壊力) ---
+                outplayed = opponents[opp_x_m < end_x].shape[0]
+
+                # パス種類
+                dx = end_x - start_x
+                dy = abs(next_event['y_m'] - event['y_m'])
+                p_type = 'Vertical (縦)' if (dx > 5 and dx > dy) else ('Horizontal (横)' if (dy > dx and dy > 5) else 'Link-up')
+
+                results.append({
+                    'AttackID': attack_id,
+                    'Pass_Order': -pass_count, # -1, -2, -3...
+                    'Passer': event['Player'],
+                    'Pass_Type': p_type,
+                    'V_Packing': v_packed,
+                    'D_Outplayed': outplayed
+                })
+
+    return pd.DataFrame(results)
+
+# --------------------------------------------------
+# 2. 実行 & 可視化
+# --------------------------------------------------
+try:
+    # play.csv の読み込み
+    raw_play = pd.read_csv('play.csv', encoding='utf-8-sig')
+
+    # --- デモ用：トラッキングデータのシミュレーション ---
+    # (※ 実際はここで pd.read_csv('your_tracking_data.csv') を行ってください)
+    play_frames_df = raw_play.rename(columns={'ハーフ開始相対時間': 'Time', '履歴No': 'HistoryNo'})
+    if 'Frame' not in play_frames_df.columns:
+        time_col = play_frames_df.get('Time', play_frames_df.get('HistoryNo'))
+        play_frames_df['Frame'] = (time_col * 25 + 100000).astype(int)
+
+    target_frames = play_frames_df['Frame'].unique()
+    track_records = []
+    for f in target_frames:
+        for i in range(1, 12): # 敵11人
+            track_records.append({
+                'Frame': f, 'No': i,
+                'X': np.random.randint(-4000, 4000), # cm
+                'Y': np.random.randint(-3000, 3000)
+            })
+    df_track = pd.DataFrame(track_records)
+    # -------------------------------------------
+
+    # 分析実行
+    df_analysis = analyze_kawasaki_critical_5(raw_play, df_track)
+
+    # --- グラフ描画 ---
+    if not df_analysis.empty:
+        print("\n======= 川崎フロンターレ：シュート前5本の「役割」分析 =======")
+
+        # パスの順番ごとの平均スタッツ
+        summary = df_analysis.groupby('Pass_Order').agg(
+            Avg_V_Packing=('V_Packing', 'mean'),
+            Avg_D_Outplayed=('D_Outplayed', 'mean'),
+            Pass_Type_Mode=('Pass_Type', lambda x: x.mode().get(0, 'N/A'))
+        ).sort_index()
+
+        print("\n【シュートへのカウントダウン・プロファイル】")
+        pd.set_option('display.float_format', '{:.2f}'.format)
+        display(summary)
+
+        # --- グラフ ---
+        plt.figure(figsize=(10, 6))
+
+        # 2軸グラフ
+        ax1 = plt.gca()
+        ax2 = ax1.twinx()
+
+        # 軸1: 縦の破壊力 (V_Packing)
+        sns.lineplot(data=summary, x=summary.index, y='Avg_V_Packing',
+                     ax=ax1, color='firebrick', marker='o', label='平均 縦パッキング数 (V_Packing)')
+        ax1.set_ylabel('縦の破壊力 (置き去り人数)', color='firebrick')
+        ax1.tick_params(axis='y', labelcolor='firebrick')
+
+        # 軸2: 横の破壊力 (D_Outplayed)
+        sns.lineplot(data=summary, x=summary.index, y='Avg_D_Outplayed',
+                     ax=ax2, color='skyblue', marker='s', label='平均 横パッキング数 (D_Outplayed)')
+        ax2.set_ylabel('横の破壊力 (置き去り人数)', color='skyblue')
+        ax2.tick_params(axis='y', labelcolor='skyblue')
+
+        ax1.set_xlabel('シュートまでのパス順 ( -1 = ラストパス)')
+        ax1.set_title('シュート前5本の「パスの役割」時系列変化')
+        ax1.grid(True, linestyle='--', alpha=0.5)
+
+        # 凡例をまとめる
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+
+        plt.show()
+
+        # --- キープレイヤーの特定 ---
+        print("\n\n======= 🔑 キー・パッカー（決定的な縦パスの出し手） =======")
+        # シュート前5本のうち、3人以上を置き去りにした縦パス
+        key_packers = df_analysis[
+            (df_analysis['Pass_Type'] == 'Vertical (縦)') &
+            (df_analysis['V_Packing'] >= 3)
+        ]
+
+        if not key_packers.empty:
+            print("シュートの起点となった「縦の破壊者」ランキング:")
+            print(key_packers['Passer'].value_counts().head(5))
+        else:
+            print("決定的な縦パス（3人以上抜き）は見つかりませんでした。")
+
+    else:
+        print("データ不足のため分析できませんでした。")
+
+except Exception as e:
+    print(f"エラーが発生しました: {e}")
+    import traceback
+    traceback.print_exc()
